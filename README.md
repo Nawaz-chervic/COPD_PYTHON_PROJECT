@@ -41,14 +41,12 @@ Create the following directory structure before training:
 
 ```text
 COPD_PYTHON_PROJECT/
-  Dataset/  # or dataset/
+  dataset/
     COPD/
       <COPD X-ray images>
     NORMAL/
       <Normal X-ray images>
 ```
-
-The training scripts will detect either `Dataset/` or `dataset/`.
 
 You can obtain image files from the Kaggle dataset:
 
@@ -58,7 +56,7 @@ This project uses the smaller `test` folder structure for quick experiments, but
 
 ## Train the model
 
-If you want to train a new CNN model, place your dataset in the `Dataset` or `dataset` folder with the class subfolders above and run:
+If you want to train a new model, place your dataset in the `dataset` folder with the class subfolders above and run:
 
 ```powershell
 python train.py
@@ -66,29 +64,9 @@ python train.py
 
 This creates or updates `copd_model.h5` in the project root.
 
-## Train classical comparison models
-
-To create additional algorithm models for comparison, run:
-
-```powershell
-python train_classical.py
-```
-
-This saves `svm_model.joblib`, `knn_model.joblib`, `rf_model.joblib`, and `lr_model.joblib` and updates `models_config.json`.
-
-## Evaluate saved models
-
-After model training, you can compare all saved models with:
-
-```powershell
-python evaluate_models.py
-```
-
-That generates `models_accuracy.json` and `model_accuracies.png` for use in the Streamlit dashboard.
-
 ## Run the Streamlit app
 
-After training and generating model files, start the web application:
+After training and generating `copd_model.h5`, start the web application:
 
 ```powershell
 streamlit run app.py
