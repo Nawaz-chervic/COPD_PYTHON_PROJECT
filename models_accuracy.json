@@ -1,0 +1,27 @@
+[
+  {
+    "model_file": "copd_model.h5",
+    "algorithm": "CNN",
+    "accuracy": 0.904
+  },
+  {
+    "model_file": "knn_model.joblib",
+    "algorithm": "KNN",
+    "accuracy": 0.912
+  },
+  {
+    "model_file": "lr_model.joblib",
+    "algorithm": "Logistic Regression",
+    "accuracy": 0.904
+  },
+  {
+    "model_file": "rf_model.joblib",
+    "algorithm": "Random Forest",
+    "accuracy": 0.904
+  },
+  {
+    "model_file": "svm_model.joblib",
+    "algorithm": "SVM",
+    "accuracy": 0.92
+  }
+]

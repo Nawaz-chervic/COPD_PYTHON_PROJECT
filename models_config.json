@@ -1,0 +1,24 @@
+{
+    "models": [
+        {
+            "file": "copd_model.h5",
+            "algorithm": "CNN"
+        },
+        {
+            "file": "svm_model.joblib",
+            "algorithm": "SVM"
+        },
+        {
+            "file": "knn_model.joblib",
+            "algorithm": "KNN"
+        },
+        {
+            "file": "rf_model.joblib",
+            "algorithm": "Random Forest"
+        },
+        {
+            "file": "lr_model.joblib",
+            "algorithm": "Logistic Regression"
+        }
+    ]
+}

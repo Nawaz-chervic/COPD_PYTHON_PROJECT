@@ -20,14 +20,15 @@ print("TensorFlow version:", tf.__version__)
 # Check Dataset
 # =====================================
 
-if not os.path.exists('dataset'):
-    print("ERROR: 'dataset' folder not found!")
+DATA_DIR = 'dataset' if os.path.exists('dataset') else 'Dataset' if os.path.exists('Dataset') else None
+if DATA_DIR is None:
+    print("ERROR: Dataset folder not found! Create 'dataset/' or 'Dataset/' with class subfolders.")
     exit()
 
 print("\nDataset contents:")
 class_counts = {}
-for cls in os.listdir('dataset'):
-    path = f'dataset/{cls}'
+for cls in os.listdir(DATA_DIR):
+    path = os.path.join(DATA_DIR, cls)
     if os.path.isdir(path):
         count = len([f for f in os.listdir(path)
                      if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
@@ -73,7 +74,7 @@ val_datagen = ImageDataGenerator(
 )
 
 train_data = train_datagen.flow_from_directory(
-    'dataset',
+    DATA_DIR,
     target_size=(224, 224),
     batch_size=16,
     class_mode='binary',
@@ -82,7 +83,7 @@ train_data = train_datagen.flow_from_directory(
 )
 
 validation_data = val_datagen.flow_from_directory(
-    'dataset',
+    DATA_DIR,
     target_size=(224, 224),
     batch_size=16,
     class_mode='binary',

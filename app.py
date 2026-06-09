@@ -4,6 +4,7 @@
 
 import streamlit as st
 import tensorflow as tf
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 import numpy as np
 import os
 import json
@@ -12,6 +13,10 @@ from datetime import datetime
 from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import glob
+import pandas as pd
+import joblib
+from model_utils import extract_features_from_array
 
 # =====================================
 # Page Config
@@ -29,6 +34,9 @@ st.set_page_config(
 
 USERS_FILE       = 'users.json'
 PREDICTIONS_FILE = 'predictions.json'
+MODELS_CONFIG_FILE = 'models_config.json'
+MODELS_ACC_FILE  = 'models_accuracy.json'
+MODEL_ACC_IMG    = 'model_accuracies.png'
 
 # =====================================
 # Helper: Hash password
@@ -80,6 +88,61 @@ def load_predictions():
     with open(PREDICTIONS_FILE, 'r') as f:
         return json.load(f)
 
+
+def load_model_config():
+    if not os.path.exists(MODELS_CONFIG_FILE):
+        return {}
+    try:
+        with open(MODELS_CONFIG_FILE, 'r') as f:
+            data = json.load(f)
+            mappings = {}
+            for entry in data.get('models', []):
+                file_name = entry.get('file')
+                algo_name = entry.get('algorithm')
+                if file_name and algo_name:
+                    mappings[file_name] = algo_name
+            return mappings
+    except Exception:
+        return {}
+
+
+def load_model_accuracies():
+    if not os.path.exists(MODELS_ACC_FILE):
+        return None
+    try:
+        with open(MODELS_ACC_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def print_model_accuracies():
+    model_accs = load_model_accuracies()
+    print('\n=== Model Accuracy Comparison ===')
+    if not model_accs:
+        print('No accuracy file found. Run `python evaluate_models.py` to generate model accuracies.')
+        print('================================\n')
+        return
+
+    rows = []
+    for m in sorted(model_accs, key=lambda x: x.get('accuracy', 0), reverse=True):
+        file_name = m.get('model_file') or m.get('model') or 'unknown'
+        algorithm = m.get('algorithm', 'unknown')
+        accuracy = m.get('accuracy', 0)
+        rows.append((file_name, algorithm, f"{accuracy * 100:.2f}%"))
+
+    col1 = max(len(r[0]) for r in rows + [("Model File", "", "")])
+    col2 = max(len(r[1]) for r in rows + [("", "Algorithm", "")])
+    col3 = max(len(r[2]) for r in rows + [("", "", "Accuracy")])
+
+    header = f"{'Model File'.ljust(col1)}  {'Algorithm'.ljust(col2)}  {'Accuracy'.rjust(col3)}"
+    print(header)
+    print('-' * len(header))
+    for file_name, algorithm, accuracy in rows:
+        print(f"{file_name.ljust(col1)}  {algorithm.ljust(col2)}  {accuracy.rjust(col3)}")
+    print('================================\n')
+
+
 def save_prediction(username, result, confidence, raw_score):
     predictions = load_predictions()
     predictions.append({
@@ -96,13 +159,63 @@ def save_prediction(username, result, confidence, raw_score):
 # Load ML Model
 # =====================================
 
+def algorithm_name(file_name, config_map):
+    if file_name in config_map:
+        return config_map[file_name]
+    return os.path.splitext(os.path.basename(file_name))[0]
+
+
 @st.cache_resource
-def load_model():
+def load_default_model():
     if not os.path.exists('copd_model.h5'):
         return None
     return tf.keras.models.load_model('copd_model.h5')
 
-model = load_model()
+model = load_default_model()
+
+
+@st.cache_resource
+def load_all_models():
+    files = sorted(glob.glob('*.h5')) + sorted(glob.glob('*.joblib')) + sorted(glob.glob('*.pkl'))
+    models = {}
+    for f in files:
+        try:
+            if f.lower().endswith('.h5'):
+                models[f] = {'model': tf.keras.models.load_model(f), 'type': 'keras'}
+            else:
+                models[f] = {'model': joblib.load(f), 'type': 'sklearn'}
+        except Exception:
+            continue
+    return models
+
+
+def predict_with_models(models_dict, img_array, config_map):
+    results = []
+    for name, entry in models_dict.items():
+        algo = algorithm_name(name, config_map)
+        model = entry['model']
+        model_type = entry['type']
+        try:
+            if model_type == 'keras':
+                # Apply preprocess_input for MobileNetV2 normalization
+                processed = preprocess_input(img_array.copy())
+                pred = model.predict(processed)
+                prob = float(pred[0][0])
+                is_copd = prob < 0.5
+                label = 'COPD Detected' if is_copd else 'No COPD (Normal)'
+                conf = (1 - prob) * 100 if is_copd else prob * 100
+                raw_score = prob
+            else:
+                features = extract_features_from_array(img_array)
+                pred_label = int(model.predict(features)[0])
+                probs = model.predict_proba(features)[0]
+                raw_score = float(probs[pred_label])
+                label = 'COPD Detected' if pred_label == 0 else 'No COPD (Normal)'
+                conf = raw_score * 100
+            results.append({'model_file': name, 'algorithm': algo, 'label': label, 'confidence': conf, 'raw_score': raw_score})
+        except Exception:
+            results.append({'model_file': name, 'algorithm': algo, 'label': 'error', 'confidence': 0.0, 'raw_score': None})
+    return results
 
 # =====================================
 # Session State Init
@@ -374,32 +487,68 @@ def patient_page():
         # Preprocess
         img_resized = img.resize((224, 224)).convert('RGB')
         img_array   = np.array(img_resized, dtype=np.float32)
-        img_array   = np.expand_dims(img_array, axis=0) / 255.0
+        img_array   = np.expand_dims(img_array, axis=0)
 
         with st.spinner("🔍 Analyzing..."):
-            prediction = model.predict(img_array)
+            model_config = load_model_config()
+            # If multiple models (.h5) exist, run each and show comparison
+            all_models = load_all_models()
+            if len(all_models) > 0:
+                multi_preds = predict_with_models(all_models, img_array, model_config)
+            else:
+                multi_preds = []
 
-        raw_score  = float(prediction[0][0])
-        is_copd    = raw_score < 0.5
-        result     = "COPD Detected" if is_copd else "No COPD (Normal)"
-        confidence = (1 - raw_score) * 100 if is_copd else raw_score * 100
+            # Fallback to single loaded model for backward compatibility
+            if model is not None and len(multi_preds) == 0:
+                processed = preprocess_input(img_array.copy())
+                prediction = model.predict(processed)
+                raw_score  = float(prediction[0][0])
+                is_copd    = raw_score < 0.5
+                result     = "COPD Detected" if is_copd else "No COPD (Normal)"
+                confidence = (1 - raw_score) * 100 if is_copd else raw_score * 100
+                algo = algorithm_name('copd_model.h5', model_config)
+                multi_preds = [{'model_file': 'copd_model.h5', 'algorithm': algo, 'label': result, 'confidence': confidence, 'raw_score': raw_score}]
 
-        # Save to history
-        save_prediction(st.session_state.username, result, confidence, raw_score)
+        # Save to history using the primary model result (first)
+        primary = multi_preds[0]
+        save_prediction(st.session_state.username, primary['label'], primary['confidence'], primary.get('raw_score', 0.0))
 
         with col_result:
             st.subheader("📊 Result")
-            if is_copd:
-                st.error(f"🔴 **{result}**")
+            if primary['label'] == 'COPD Detected':
+                st.error(f"🔴 **{primary['label']}**")
             else:
-                st.success(f"🟢 **{result}**")
+                st.success(f"🟢 **{primary['label']}**")
 
-            st.metric("Confidence", f"{confidence:.2f}%")
+            st.metric("Confidence", f"{primary['confidence']:.2f}%")
             st.caption("⚠️ For educational purposes only. Consult a doctor.")
 
         st.markdown("---")
         st.subheader("📈 Prediction Analysis")
-        show_prediction_chart(result, confidence, raw_score)
+        # Show comparison table and chart for models
+        df = pd.DataFrame(multi_preds)
+        # attach stored model accuracies if available
+        model_accs = load_model_accuracies() or []
+        acc_map = {m.get('model_file', m.get('model')): m.get('accuracy', None) for m in model_accs}
+        df['model_accuracy'] = df['model_file'].map(lambda x: acc_map.get(x, None))
+        df['algorithm_display'] = df['algorithm']
+
+        st.table(df[['algorithm_display', 'label', 'confidence', 'model_accuracy']].rename(columns={'algorithm_display':'Algorithm','label':'Prediction','confidence':'Confidence (%)','model_accuracy':'Model Accuracy'}))
+
+        # Bar chart: model confidences
+        fig, ax = plt.subplots(figsize=(8,3))
+        names = df['algorithm_display']
+        confs = df['confidence']
+        bars = ax.bar(names, confs, color=plt.cm.tab10.colors[:len(names)])
+        ax.set_ylim(0,100)
+        ax.set_ylabel('Confidence (%)')
+        ax.set_title('Per-model Prediction Confidence')
+        plt.xticks(rotation=45, ha='right')
+        for bar, val in zip(bars, confs):
+            ax.text(bar.get_x()+bar.get_width()/2, val+1, f"{val:.1f}%", ha='center')
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
 
     # Patient's own history
     st.markdown("---")
@@ -523,36 +672,71 @@ def doctor_page():
         img         = Image.open(uploaded_file)
         img_resized = img.resize((224, 224)).convert('RGB')
         img_array   = np.array(img_resized, dtype=np.float32)
-        img_array   = np.expand_dims(img_array, axis=0) / 255.0
+        img_array   = np.expand_dims(img_array, axis=0)
 
         col_img, col_res = st.columns(2)
         with col_img:
             st.image(img, caption="Uploaded X-Ray", use_container_width=True)
 
         with st.spinner("Analyzing..."):
-            prediction = model.predict(img_array)
+            model_config = load_model_config()
+            # Multi-model prediction
+            all_models = load_all_models()
+            if len(all_models) > 0:
+                multi_preds = predict_with_models(all_models, img_array, model_config)
+            else:
+                multi_preds = []
 
-        raw_score  = float(prediction[0][0])
-        is_copd    = raw_score < 0.5
-        result     = "COPD Detected" if is_copd else "No COPD (Normal)"
-        confidence = (1 - raw_score) * 100 if is_copd else raw_score * 100
+            if model is not None and len(multi_preds) == 0:
+                processed = preprocess_input(img_array.copy())
+                prediction = model.predict(processed)
+                raw_score  = float(prediction[0][0])
+                is_copd    = raw_score < 0.5
+                result     = "COPD Detected" if is_copd else "No COPD (Normal)"
+                confidence = (1 - raw_score) * 100 if is_copd else raw_score * 100
+                algo = algorithm_name('copd_model.h5', model_config)
+                multi_preds = [{'model_file': 'copd_model.h5', 'algorithm': algo, 'label': result, 'confidence': confidence, 'raw_score': raw_score}]
 
-        save_prediction(selected_for_scan, result, confidence, raw_score)
+        primary = multi_preds[0]
+        save_prediction(selected_for_scan, primary['label'], primary['confidence'], primary.get('raw_score', 0.0))
 
         with col_res:
             st.subheader("Result")
-            if is_copd:
-                st.error(f"🔴 **{result}**")
+            if primary['label'] == 'COPD Detected':
+                st.error(f"🔴 **{primary['label']}**")
             else:
-                st.success(f"🟢 **{result}**")
-            st.metric("Confidence", f"{confidence:.2f}%")
+                st.success(f"🟢 **{primary['label']}**")
+            st.metric("Confidence", f"{primary['confidence']:.2f}%")
 
         st.subheader("📈 Prediction Analysis")
-        show_prediction_chart(result, confidence, raw_score)
+        df = pd.DataFrame(multi_preds)
+        model_accs = load_model_accuracies() or []
+        acc_map = {m.get('model_file', m.get('model')): m.get('accuracy', None) for m in model_accs}
+        df['model_accuracy'] = df['model_file'].map(lambda x: acc_map.get(x, None))
+        df['algorithm_display'] = df['algorithm']
+        st.table(df[['algorithm_display', 'label', 'confidence', 'model_accuracy']].rename(columns={'algorithm_display':'Algorithm','label':'Prediction','confidence':'Confidence (%)','model_accuracy':'Model Accuracy'}))
+
+        fig, ax = plt.subplots(figsize=(8,3))
+        names = df['algorithm_display']
+        confs = df['confidence']
+        bars = ax.bar(names, confs, color=plt.cm.tab10.colors[:len(names)])
+        ax.set_ylim(0,100)
+        ax.set_ylabel('Confidence (%)')
+        ax.set_title('Per-model Prediction Confidence')
+        plt.xticks(rotation=45, ha='right')
+        for bar, val in zip(bars, confs):
+            ax.text(bar.get_x()+bar.get_width()/2, val+1, f"{val:.1f}%", ha='center')
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
 
 # =====================================
 # MAIN ROUTER
 # =====================================
+
+if 'printed_accuracy_table' not in st.session_state:
+    print_model_accuracies()
+    st.session_state.printed_accuracy_table = True
 
 if not st.session_state.logged_in:
     login_page()
